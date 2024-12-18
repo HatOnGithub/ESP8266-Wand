@@ -2,8 +2,8 @@
 #include <Wire.h>
 #include "MPU6050_6Axis_MotionApps20.h"
 #include <arduino-timer.h>
-#include <WiFiClient.h>
 #include <EEPROM.h>
+#include <ESP8266WiFi.h>
 
 
 // pin allocations
@@ -47,9 +47,9 @@ float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gra
 float &yaw = ypr[0];
 float &pitch = ypr[1];
 float &roll = ypr[2];
-
 float x, y, z;
 
+// MPU interrupt vars
 volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
 
 void IRAM_ATTR dmpDataReady() {
@@ -62,16 +62,20 @@ unsigned long lastScreenRefresh = 0;
 String ssid;
 String password;
 String servername;
+WiFiClient client;
 
 
 
 // function declarations
 void firstSetup();
+void connectToWiFi();
 void updateAccelGyro();
 void reportValues();
 void startGestureCheck();
 void processSerialCommands();
 void storeStringInEEPROM(String, int);
+void checkForGestureStartCommand();
+void sendCommandOverNetwork(String);
 String readStringInEEPROM(int);
 bool yawBetween(float, float);
 bool pitchBetween(float, float);
@@ -98,13 +102,13 @@ class Gesture {
     if(!started){
       if(StartStage()){
         started = true;
-        Serial.println("detected start");
+        Serial.println(F("detected start"));
       }
     }
     else if(!moving){
       if(Movement()){
           moving = true;
-          Serial.println("detected move");
+          Serial.println(F("detected move"));
         }
     }
     else {
@@ -172,7 +176,7 @@ void startGestureCheck(){
 
 void setup() {
   
-  Serial.begin(9600);
+  Serial.begin(115200);
   Wire.begin(sda, scl);
   EEPROM.begin(512);
   pinMode(interrupt, INPUT);
@@ -182,11 +186,11 @@ void setup() {
   Serial.println(reset);
 
   if (reset == 0){
-    Serial.println("First boot, starting setup");
+    Serial.println(F("First boot, starting setup"));
 
     firstSetup();
 
-    Serial.println("Setup complete");
+    Serial.println(F("Setup complete"));
     
     EEPROM.put(hasValues, 1);
     EEPROM.commit();
@@ -203,6 +207,9 @@ void setup() {
   gestures[1] = new RightGesture();
   gestures[2] = new DownGesture();
 
+  connectToWiFi();
+  connectToServer();
+
   // initialize device
   Serial.println(F("Initializing I2C devices..."));
   mpu.initialize();
@@ -210,10 +217,10 @@ void setup() {
   // verify connection
   Serial.println(F("Testing device connections..."));
   if (mpu.testConnection()){
-    Serial.println("MPU6050 connection successful");
+    Serial.println(F("MPU6050 connection successful"));
   }
   else{
-    Serial.println("MPU6050 connection failed");
+    Serial.println(F("MPU6050 connection failed"));
     while(1);
   }
 
@@ -268,60 +275,100 @@ void setup() {
 
 void loop() {
 
-    timer.tick();
+  timer.tick();
 
-    processSerialCommands();
+  processSerialCommands();
 
-    // if programming failed, don't try to do anything
-    if (!dmpReady){
-      return;
+  checkForGestureStartCommand();
+
+  // if programming failed, don't try to do anything
+  if (!dmpReady){
+    return;
+  }
+
+  // read a packet from FIFO
+  if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) {
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    mpu.dmpGetAccel(&aa, fifoBuffer);
+    mpu.dmpGetGravity(&gravity, &q);
+    mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
+    mpu.dmpGetLinearAccelInWorld(&aaWorld, &aaReal, &q);
+    mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+
+    // convert to degrees
+    yaw *= 180/M_PI;
+    pitch *= 180/M_PI;
+    roll *= 180/M_PI;
+
+    // apply scaling
+    x = aaReal.x / accelScale;
+    y = aaReal.y / accelScale;
+    z = aaReal.z / accelScale;
+
+    if (enableReporting){
+      reportValues();
     }
+  }
 
-    // read a packet from FIFO
-    if (mpu.dmpGetCurrentFIFOPacket(fifoBuffer)) {
-      mpu.dmpGetQuaternion(&q, fifoBuffer);
-      mpu.dmpGetAccel(&aa, fifoBuffer);
-      mpu.dmpGetGravity(&gravity, &q);
-      mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
-      mpu.dmpGetLinearAccelInWorld(&aaWorld, &aaReal, &q);
-      mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
-
-      // convert to degrees
-      yaw *= 180/M_PI;
-      pitch *= 180/M_PI;
-      roll *= 180/M_PI;
-
-      // apply scaling
-      x = aaReal.x / accelScale;
-      y = aaReal.y / accelScale;
-      z = aaReal.z / accelScale;
-
-      if (enableReporting){
-        reportValues();
+  if(checkGestures){
+    for(int i = 0 ; i < 3; i++){
+      if (gestures[i]->CheckMovement()){
+        String command = gestures[i]->command;
+        digitalWrite(led, HIGH);
+        timer.in(LEDFlashTime, turnOffLED);
+        Serial.println(command);
+        sendCommandOverNetwork(command);
       }
     }
-
-    if(checkGestures){
-      for(int i = 0 ; i < 3; i++){
-        if (gestures[i]->CheckMovement()){
-          String command = gestures[i]->command;
-          digitalWrite(led, HIGH);
-          timer.in(LEDFlashTime, turnOffLED);
-          Serial.println(command);
-        }
-      }
-      if(millis() - gestureCheckStart >= gesturePeriod){
-        checkGestures = false;
-        Serial.println("Gesture check complete");
-      }
+    if(millis() - gestureCheckStart >= gesturePeriod){
+      checkGestures = false;
+      Serial.println(F("Gesture check complete"));
     }
+  }
+}
 
+void connectToWiFi(){
+  Serial.println(F("Connecting to WiFi"));
+  WiFi.begin(ssid.c_str(), password.c_str());
+  while (WiFi.status() != WL_CONNECTED){
+    delay(500);
+    Serial.print(F("."));
+  }
+  Serial.println(F("Connected to WiFi"));
+  Serial.print(F("Local IP: ")); Serial.println(WiFi.localIP());
+}
 
+void connectToServer(){
+  Serial.println(F("Connecting to server"));
+  if (!client.connect(servername, 1880)){
+    Serial.println(F("Connection failed"));
+    return;
+  }
+  Serial.println(F("Connected to server"));
+}
+
+void sendCommandOverNetwork(String command){
+  if (!client.connected()){
+    connectToServer();
+  }
+  client.print(command);
+}
+
+void checkForGestureStartCommand(){
+  if (!client.connected()){
+    connectToServer();
+  }
+  if (client.available()){
+    String command = client.readStringUntil('\n');
+    if (command == "start"){
+      startGestureCheck();
+    }
+  }
 }
 
 void storeStringInEEPROM(String str, int start){
   if (str.length() > 64){
-    Serial.println("String too long, max is 64 characters");
+    Serial.println(F("String too long, max is 64 characters"));
     return;
   }
   for (int i = 0; i < str.length(); i++){
@@ -344,23 +391,23 @@ String readStringInEEPROM(int start){
 }
 
 void firstSetup(){
-  Serial.println("Please enter the SSID of your network");
+  Serial.println(F("Please enter the SSID of your network"));
   while(Serial.available() == 0);
   String tempssid = Serial.readStringUntil('\n');
 
-  Serial.println("Please enter the password of your network");
+  Serial.println(F("Please enter the password of your network"));
   while(Serial.available() == 0);
   String temppassword = Serial.readStringUntil('\n');
 
-  Serial.println("Please enter the IP address, port (,and subdirectory) of the host server");
+  Serial.println(F("Please enter the IP address, port (,and subdirectory) of the host server"));
   while(Serial.available() == 0);
   String tempservername = Serial.readStringUntil('\n');
 
-  Serial.println("these are the values you entered: ");
-  Serial.print("SSID: "); Serial.println(tempssid);
-  Serial.print("Password: "); Serial.println(temppassword);
-  Serial.print("Server: "); Serial.println(tempservername);
-  Serial.println("If these are correct, type 'y' to save them to EEPROM, else type 'n' to re-enter them");
+  Serial.println(F("these are the values you entered: "));
+  Serial.print(F("SSID: ")); Serial.println(tempssid);
+  Serial.print(F("Password: ")); Serial.println(temppassword);
+  Serial.print(F("Server: ")); Serial.println(tempservername);
+  Serial.println(F("If these are correct, type 'y' to save them to EEPROM, else type 'n' to re-enter them"));
 
   while(Serial.available() == 0);
   String response = Serial.readStringUntil('\n');
@@ -388,7 +435,7 @@ void processSerialCommands(){
       // set the IP address
       command.remove(0, 11);
       command.trim();
-      Serial.print("Setting reporting server to: ");
+      Serial.print(F("Setting reporting server to: "));
       Serial.println(command);
 
       servername = command;
@@ -399,7 +446,7 @@ void processSerialCommands(){
       // set the SSID
       command.remove(0, 9);
       command.trim();
-      Serial.print("Setting SSID to: ");
+      Serial.print(F("Setting SSID to: "));
       Serial.println(command);
 
       ssid = command;
@@ -410,33 +457,33 @@ void processSerialCommands(){
       // set the password
       command.remove(0, 13);
       command.trim();
-      Serial.print("Setting password to: ");
+      Serial.print(F("Setting password to: "));
       Serial.println(command);
 
       password = command;
       storeStringInEEPROM(password, eepromPassword);
     }
     else if (command.startsWith("view-stored-values")){
-      Serial.print("SSID: "); Serial.println(readStringInEEPROM(eepromSSID));
-      Serial.print("Password: "); Serial.println(readStringInEEPROM(eepromPassword));
-      Serial.print("Server: "); Serial.println(readStringInEEPROM(eepromServer));
-      Serial.print("Reset flag (0 = First Boot, 1 = Normal): "); Serial.println(EEPROM.read(hasValues));
+      Serial.print(F("SSID: ")); Serial.println(readStringInEEPROM(eepromSSID));
+      Serial.print(F("Password: ")); Serial.println(readStringInEEPROM(eepromPassword));
+      Serial.print(F("Server: ")); Serial.println(readStringInEEPROM(eepromServer));
+      Serial.print(F("Reset flag (0 = First Boot, 1 = Normal): ")); Serial.println(EEPROM.read(hasValues));
     }
     else if (command == "toggle-report")
     {
       enableReporting = !enableReporting;
-      Serial.print("Reporting is now ");
+      Serial.print(F("Reporting is now "));
       Serial.println(enableReporting ? "enabled" : "disabled");
     }
 
     else if (command == "sim"){
-      Serial.println("Simulating gesture start");
+      Serial.println(F("Simulating gesture start"));
       startGestureCheck();
     }
 
     else if (command == "reset")
     {
-      Serial.println("Resetting EEPROM");
+      Serial.println(F("Resetting EEPROM"));
       for (int i = 0; i < 200; i++)
       {
         EEPROM.put(i, 0);
@@ -449,12 +496,12 @@ void processSerialCommands(){
 
 void reportValues(){ 
 
-  Serial.print(x); Serial.print(",");
-  Serial.print(y); Serial.print(",");
-  Serial.print(z); Serial.print(",");
+  Serial.print(x); Serial.print(F(","));
+  Serial.print(y); Serial.print(F(","));
+  Serial.print(z); Serial.print(F(","));
 
-  Serial.print(yaw); Serial.print(",");
-  Serial.print(pitch); Serial.print(",");
+  Serial.print(yaw); Serial.print(F(","));
+  Serial.print(pitch); Serial.print(F(","));
   Serial.print(roll); Serial.println();
 
 }
