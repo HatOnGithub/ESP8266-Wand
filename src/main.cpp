@@ -83,15 +83,6 @@ bool turnOffLED(void *){
 
 
 class Gesture {
-  protected : long startGoal;
-  protected : long moveGoal;
-  protected : long startLimit;
-  protected : unsigned long moveLimit;
-  protected : unsigned long endGoal;
-  protected : unsigned long endLimit;
-  unsigned long lastMove;
-  long trueTime;
-  long falseTime;
   bool started;
   bool moving;
   public : String command;
@@ -100,162 +91,73 @@ class Gesture {
   public : virtual bool Movement() = 0;
   public : virtual bool EndStage() = 0;
 
-  Gesture(long startGoal, long moveGoal, long startLimit, unsigned long moveLimit,
-    unsigned long endGoal, unsigned long endLimit, const String& command)
-    : startGoal(startGoal), moveGoal(moveGoal), startLimit(startLimit),
-    moveLimit(moveLimit), endGoal(endGoal), endLimit(endLimit), command(command),
-    lastMove(0), trueTime(0), falseTime(0), started(false), moving(false) {
+  Gesture(const String& command) : command(command),
+     started(false), moving(false) {
     }
   bool CheckMovement(){
     if(!started){
       if(StartStage()){
-        trueTime += (millis() - lastMove);
-        if(trueTime > startGoal){
-          started = true;
-          falseTime = 0;
-          trueTime = 0;
-          Serial.println("detected start");
-          }
-        }
-      else{
-        falseTime += (millis() - lastMove);
-        if(falseTime > startLimit){
-          falseTime = 0;
-          trueTime = 0;
-          }
-        }
-      lastMove = millis();
+        started = true;
+        Serial.println("detected start");
+      }
     }
     else if(!moving){
       if(Movement()){
-        trueTime += (millis() - lastMove);
-        if(trueTime > moveGoal){
           moving = true;
-          falseTime = 0;
-          trueTime = 0;
           Serial.println("detected move");
-          }
         }
-      else{
-        falseTime += (millis() - lastMove);
-        if(falseTime > moveLimit){
-          falseTime = 0;
-          trueTime = 0;
-          started = false;
-          }
-        }
-      lastMove = millis();
     }
     else {
       if(EndStage()){
-        trueTime += (millis() - lastMove);
-        if(trueTime > endGoal){
-          falseTime = 0;
-          trueTime = 0;
           started = false;
           moving = false;
           return true;
-          }
         }
-      else{
-        falseTime += (millis() - lastMove);
-        if(falseTime > endLimit){
-          falseTime = 0;
-          trueTime = 0;
-          started = false;
-          moving = false;
-          }
-        }
-      lastMove = millis();
     }
+    
     return false;
   }
 };
 
 class RightGesture : public Gesture{
   public : bool StartStage() override {
-   if (abs((roll) > 140 && yaw > -40) &&  yaw < 40){
-    if(abs(aaReal.x / accelScale) < 0.2  && abs(aaReal.y / accelScale) < 0.2  && abs(aaReal.z / accelScale) < 0.2){
-      return true;
-    }
-   }
-   return false;
+   return (yawBetween(-135, -45) && pitchBetween(-45, 45) && rollBetween(-45, 45));
   }
   public : bool Movement() override {
-    if (abs((roll) > 140 && yaw > -40) &&  yaw < 40){
-      if(abs(aaReal.x / accelScale) < 0.4  && abs(aaReal.y / accelScale) < 0.4  && abs(aaReal.z / accelScale) > 0.4){
-      return true;
-      }
-    }
-    return false;
+    return (yawBetween(-135, 45) && abs(aaReal.x / accelScale) > 0.4 );
   }
   public : bool EndStage() override {
-    if (abs((roll) > 140 && yaw > -40) &&  yaw < 40){
-      if(abs(aaReal.x / accelScale) < 0.2  && abs(aaReal.y / accelScale) < 0.2  && abs(aaReal.z / accelScale) < 0.2){
-      return true;
-      }
-    }
-    return false;
+    return (yawBetween(-30, 30) && abs(aaReal.x / accelScale) < 0.2);
   }
-  RightGesture() : Gesture(500, 60, 2000, 4000, 300, 3000, "Right") {
+  RightGesture() : Gesture("Right") {
   }
 }; 
 
 class LeftGesture : public Gesture{
   public : bool StartStage() override {
-   if (((roll) < -30 && (roll) > -90 && yaw > -50) &&  yaw < 50){
-    if(abs(aaReal.x / accelScale) < 0.4  && abs(aaReal.y / accelScale) < 0.4  && abs(aaReal.z / accelScale) < 0.4){
-      return true;
-    }
-   }
-   return false;
+   return (yawBetween(45, 135) && pitchBetween(-45, 45) && rollBetween(-45, 45));
   }
   public : bool Movement() override {
-   if (((roll) < -50 && (roll) > -180 && yaw > -50) &&  yaw < 50){
-    if(abs(aaReal.x / accelScale) < 0.5  && abs(aaReal.y / accelScale) < 0.5  && abs(aaReal.z / accelScale) < 0.5){
-      return true;
-    }
-   }
-    return false;
+    return (yawBetween(-45, 125) && abs(aaReal.x / accelScale) > 0.4 );
   }
   public : bool EndStage() override {
-  if (((roll) < 180 && (roll) > 100 && yaw > -50) &&  yaw < 50){
-    if(abs(aaReal.x / accelScale) < 0.4  && abs(aaReal.y / accelScale) < 0.4  && abs(aaReal.z / accelScale) < 0.4){
-      return true;
-    }
-   }
-    return false;
+    return (yawBetween(-30, 30) && abs(aaReal.x / accelScale) < 0.2);
   }
-  LeftGesture() : Gesture(500, 60, 2000, 4000, 300, 3000, "Left") {
+  LeftGesture() : Gesture("Left") {
   }
 };  
 
 class DownGesture : public Gesture{
   public : bool StartStage() override {
-   if (((roll) < -30 && (roll) > -90 && yaw > -50) &&  yaw < 50){
-    if(abs(aaReal.x / accelScale) < 0.4  && abs(aaReal.y / accelScale) < 0.4  && abs(aaReal.z / accelScale) < 0.4){
-      return true;
-    }
-   }
-   return false;
+    return (pitchBetween(45, 135) && yawBetween(-45, 45) && rollBetween(-45, 45));
   }
   public : bool Movement() override {
-   if (((roll) < -50 && (roll) > -180 && yaw > -50) &&  yaw < 50){
-    if(abs(aaReal.x / accelScale) < 0.5  && abs(aaReal.y / accelScale) < 0.5  && abs(aaReal.z / accelScale) < 0.5){
-      return true;
-    }
-   }
-    return false;
+    return (pitchBetween(-45, 135) && abs(aaReal.y / accelScale) > 0.4 );
   }
   public : bool EndStage() override {
-  if (((roll) < 180 && (roll) > 100 && yaw > -50) &&  yaw < 50){
-    if(abs(aaReal.x / accelScale) < 0.4  && abs(aaReal.y / accelScale) < 0.4  && abs(aaReal.z / accelScale) < 0.4){
-      return true;
-    }
-   }
-    return false;
+    return (pitchBetween(-30, 30) && abs(aaReal.y / accelScale) < 0.2);
   }
-  DownGesture() : Gesture(500, 60, 2000, 4000, 300, 3000, "Down") {
+  DownGesture() : Gesture("Down") {
   }
 };  
 
@@ -366,6 +268,8 @@ void setup() {
 
 void loop() {
 
+    timer.tick();
+
     processSerialCommands();
 
     // if programming failed, don't try to do anything
@@ -398,7 +302,7 @@ void loop() {
     }
 
     if(checkGestures){
-      for(int i = 0 ; i < 2; i++){
+      for(int i = 0 ; i < 3; i++){
         if (gestures[i]->CheckMovement()){
           String command = gestures[i]->command;
           digitalWrite(led, HIGH);
@@ -408,6 +312,7 @@ void loop() {
       }
       if(millis() - gestureCheckStart >= gesturePeriod){
         checkGestures = false;
+        Serial.println("Gesture check complete");
       }
     }
 
@@ -523,6 +428,12 @@ void processSerialCommands(){
       Serial.print("Reporting is now ");
       Serial.println(enableReporting ? "enabled" : "disabled");
     }
+
+    else if (command == "sim"){
+      Serial.println("Simulating gesture start");
+      startGestureCheck();
+    }
+
     else if (command == "reset")
     {
       Serial.println("Resetting EEPROM");
