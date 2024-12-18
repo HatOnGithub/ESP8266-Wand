@@ -1,20 +1,30 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "MPU6050_6Axis_MotionApps20.h"
+#include <arduino-timer.h>
+#include <WiFiClient.h>
+#include <EEPROM.h>
+
 
 // pin allocations
-const int scl = D1, sda = D2, led = D3, interrupt = D4, button = D5;
+const int scl = D1, sda = D2, led = D6, interrupt = D7;
+
+// EEPROM addresses
+const int eepromSSID = 0, eepromPassword = 64, eepromServer = 128, hasValues = 192;
+
+const unsigned long LEDFlashTime = 150;
 
 const unsigned long gesturePeriod = 3000;
 unsigned long gestureCheckStart;
 
-bool checkGestures = false;
+bool checkGestures = false, enableReporting = false;
 
 // MPU6050 related stuff
 const int accelRange = 4, gyroRange = 250;
 const float accelScale = 32767 / accelRange, gyroScale = 32767 / gyroRange;
 
 MPU6050 mpu;
+Timer timer = timer_create_default(); // create a timer with default settings
 
 // MPU control/status vars
 bool dmpReady = false;  // set true if DMP init was successful
@@ -37,21 +47,39 @@ float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gra
 float &yaw = ypr[0];
 float &pitch = ypr[1];
 float &roll = ypr[2];
-int16_t &x = aaReal.x;
-int16_t &y = aaReal.y;
-int16_t &z = aaReal.z;
+
+float x, y, z;
 
 volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
-void dmpDataReady() {
+
+void IRAM_ATTR dmpDataReady() {
     mpuInterrupt = true;
 }
 
 unsigned long lastScreenRefresh = 0;
 
+// network related stuff
+String ssid;
+String password;
+String servername;
+
+
 
 // function declarations
+void firstSetup();
 void updateAccelGyro();
 void reportValues();
+void startGestureCheck();
+void processSerialCommands();
+void storeStringInEEPROM(String, int);
+String readStringInEEPROM(int);
+bool yawBetween(float, float);
+bool pitchBetween(float, float);
+bool rollBetween(float, float);
+bool turnOffLED(void *){
+  digitalWrite(led, LOW);
+  return true;
+}
 
 
 class Gesture {
@@ -235,11 +263,39 @@ class DownGesture : public Gesture{
 
 Gesture* gestures[3];
 
+void startGestureCheck(){
+  gestureCheckStart = millis();
+  checkGestures = true;
+}
+
 void setup() {
-  Wire.begin();
-  Wire.setClock(100000);
-  mpu.initialize();
-  Serial.begin(115200);
+  
+  Serial.begin(9600);
+  Wire.begin(sda, scl);
+  EEPROM.begin(512);
+  pinMode(interrupt, INPUT);
+
+  bool reset = EEPROM.read(hasValues);
+
+  Serial.println(reset);
+
+  if (reset == 0){
+    Serial.println("First boot, starting setup");
+
+    firstSetup();
+
+    Serial.println("Setup complete");
+    
+    EEPROM.put(hasValues, 1);
+    EEPROM.commit();
+  }
+  else{
+    ssid = readStringInEEPROM(eepromSSID);
+    password = readStringInEEPROM(eepromPassword);
+    servername = readStringInEEPROM(eepromServer);
+  }
+
+  pinMode(led, OUTPUT);
   
   gestures[0] = new LeftGesture();
   gestures[1] = new RightGesture();
@@ -248,11 +304,20 @@ void setup() {
   // initialize device
   Serial.println(F("Initializing I2C devices..."));
   mpu.initialize();
-  pinMode(interrupt, INPUT);
 
   // verify connection
   Serial.println(F("Testing device connections..."));
-  Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
+  if (mpu.testConnection()){
+    Serial.println("MPU6050 connection successful");
+  }
+  else{
+    Serial.println("MPU6050 connection failed");
+    while(1);
+  }
+
+  // set sensitivity of the MPU
+  mpu.setFullScaleGyroRange(gyroRange);
+  mpu.setFullScaleAccelRange(accelRange);
 
   // load and configure the DMP
   Serial.println(F("Initializing DMP..."));
@@ -276,17 +341,18 @@ void setup() {
 
       // enable Arduino interrupt detection
       Serial.print(F("Enabling interrupt detection (Arduino external interrupt "));
-      Serial.print(digitalPinToInterrupt(interrupt));
+      Serial.print(interrupt);
       Serial.println(F(")..."));
       attachInterrupt(digitalPinToInterrupt(interrupt), dmpDataReady, RISING);
       mpuIntStatus = mpu.getIntStatus();
 
       // set our DMP Ready flag so the main loop() function knows it's okay to use it
-      Serial.println(F("DMP ready! Waiting for first interrupt..."));
+      Serial.println(F("DMP ready! Starting Loop!"));
       dmpReady = true;
 
       // get expected DMP packet size for later comparison
       packetSize = mpu.dmpGetFIFOPacketSize();
+
   } else {
       // ERROR!
       // 1 = initial memory load failed
@@ -299,7 +365,9 @@ void setup() {
 }
 
 void loop() {
-  
+
+    processSerialCommands();
+
     // if programming failed, don't try to do anything
     if (!dmpReady){
       return;
@@ -320,21 +388,21 @@ void loop() {
       roll *= 180/M_PI;
 
       // apply scaling
-      x /= accelScale;
-      y /= accelScale;
-      z /= accelScale;
-      //reportValues();
+      x = aaReal.x / accelScale;
+      y = aaReal.y / accelScale;
+      z = aaReal.z / accelScale;
+
+      if (enableReporting){
+        reportValues();
+      }
     }
 
-    if(!checkGestures) {
-      Serial.println("startGesture done");
-      checkGestures = true;
-      gestureCheckStart = millis();
-    }
     if(checkGestures){
       for(int i = 0 ; i < 2; i++){
         if (gestures[i]->CheckMovement()){
           String command = gestures[i]->command;
+          digitalWrite(led, HIGH);
+          timer.in(LEDFlashTime, turnOffLED);
           Serial.println(command);
         }
       }
@@ -344,6 +412,128 @@ void loop() {
     }
 
 
+}
+
+void storeStringInEEPROM(String str, int start){
+  if (str.length() > 64){
+    Serial.println("String too long, max is 64 characters");
+    return;
+  }
+  for (int i = 0; i < str.length(); i++){
+    EEPROM.put(start + i, str[i]);
+  }
+  for (int i = str.length(); i < 64; i++){
+    EEPROM.put(start + i, ' ');
+  }
+  EEPROM.commit();
+}
+
+String readStringInEEPROM(int start){
+  String str = "";
+  for (int i = start; i < start + 64; i++){
+    str += char(EEPROM.read(i));
+  }
+  str.trim();
+
+  return str;
+}
+
+void firstSetup(){
+  Serial.println("Please enter the SSID of your network");
+  while(Serial.available() == 0);
+  String tempssid = Serial.readStringUntil('\n');
+
+  Serial.println("Please enter the password of your network");
+  while(Serial.available() == 0);
+  String temppassword = Serial.readStringUntil('\n');
+
+  Serial.println("Please enter the IP address, port (,and subdirectory) of the host server");
+  while(Serial.available() == 0);
+  String tempservername = Serial.readStringUntil('\n');
+
+  Serial.println("these are the values you entered: ");
+  Serial.print("SSID: "); Serial.println(tempssid);
+  Serial.print("Password: "); Serial.println(temppassword);
+  Serial.print("Server: "); Serial.println(tempservername);
+  Serial.println("If these are correct, type 'y' to save them to EEPROM, else type 'n' to re-enter them");
+
+  while(Serial.available() == 0);
+  String response = Serial.readStringUntil('\n');
+  if (response == "y"){
+    ssid = tempssid;
+    password = temppassword;
+    servername = tempservername;
+    storeStringInEEPROM(ssid, eepromSSID);
+    storeStringInEEPROM(password, eepromPassword);
+    storeStringInEEPROM(servername, eepromServer);
+
+    EEPROM.commit();
+  }
+  else firstSetup();
+}
+
+void processSerialCommands(){
+  if(Serial.available() > 0){
+    String command = Serial.readStringUntil('\n');
+    if(command == "start"){
+      startGestureCheck();
+    }
+    else if (command.startsWith("set-server "))
+    {
+      // set the IP address
+      command.remove(0, 11);
+      command.trim();
+      Serial.print("Setting reporting server to: ");
+      Serial.println(command);
+
+      servername = command;
+      storeStringInEEPROM(servername, eepromServer);
+    }
+    else if (command.startsWith("set-ssid "))
+    {
+      // set the SSID
+      command.remove(0, 9);
+      command.trim();
+      Serial.print("Setting SSID to: ");
+      Serial.println(command);
+
+      ssid = command;
+      storeStringInEEPROM(ssid, eepromSSID);
+    }
+    else if (command.startsWith("set-password "))
+    {
+      // set the password
+      command.remove(0, 13);
+      command.trim();
+      Serial.print("Setting password to: ");
+      Serial.println(command);
+
+      password = command;
+      storeStringInEEPROM(password, eepromPassword);
+    }
+    else if (command.startsWith("view-stored-values")){
+      Serial.print("SSID: "); Serial.println(readStringInEEPROM(eepromSSID));
+      Serial.print("Password: "); Serial.println(readStringInEEPROM(eepromPassword));
+      Serial.print("Server: "); Serial.println(readStringInEEPROM(eepromServer));
+      Serial.print("Reset flag (0 = First Boot, 1 = Normal): "); Serial.println(EEPROM.read(hasValues));
+    }
+    else if (command == "toggle-report")
+    {
+      enableReporting = !enableReporting;
+      Serial.print("Reporting is now ");
+      Serial.println(enableReporting ? "enabled" : "disabled");
+    }
+    else if (command == "reset")
+    {
+      Serial.println("Resetting EEPROM");
+      for (int i = 0; i < 200; i++)
+      {
+        EEPROM.put(i, 0);
+      }
+      EEPROM.put(hasValues, 0);
+      EEPROM.commit();
+    }
+  }
 }
 
 void reportValues(){ 
@@ -356,4 +546,16 @@ void reportValues(){
   Serial.print(pitch); Serial.print(",");
   Serial.print(roll); Serial.println();
 
+}
+
+bool yawBetween(float min, float max){
+  return yaw > min && yaw < max;
+}
+
+bool pitchBetween(float min, float max){
+  return pitch > min && pitch < max;
+}
+
+bool rollBetween(float min, float max){
+  return roll > min && roll < max;
 }
