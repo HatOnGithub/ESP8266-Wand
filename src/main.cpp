@@ -64,11 +64,14 @@ String password;
 String servername;
 WiFiClient client;
 
+const int maxConnectionAttempts = 5;
+int connectionAttempts = 0;
 
 
 // function declarations
 void firstSetup();
 void connectToWiFi();
+void connectToServer();
 void updateAccelGyro();
 void reportValues();
 void startGestureCheck();
@@ -88,15 +91,13 @@ bool turnOffLED(void *){
 
 class Gesture {
   bool started;
-  bool moving;
   public : String command;
 
   public : virtual bool StartStage() = 0;
-  public : virtual bool Movement() = 0;
   public : virtual bool EndStage() = 0;
 
   Gesture(const String& command) : command(command),
-     started(false), moving(false) {
+     started(false){
     }
   bool CheckMovement(){
     if(!started){
@@ -105,16 +106,9 @@ class Gesture {
         Serial.println(F("detected start"));
       }
     }
-    else if(!moving){
-      if(Movement()){
-          moving = true;
-          Serial.println(F("detected move"));
-        }
-    }
     else {
       if(EndStage()){
           started = false;
-          moving = false;
           return true;
         }
     }
@@ -127,9 +121,6 @@ class RightGesture : public Gesture{
   public : bool StartStage() override {
    return (yawBetween(-135, -45) && pitchBetween(-45, 45) && rollBetween(-45, 45));
   }
-  public : bool Movement() override {
-    return (yawBetween(-135, 45) && abs(aaReal.x / accelScale) > 0.4 );
-  }
   public : bool EndStage() override {
     return (yawBetween(-30, 30) && abs(aaReal.x / accelScale) < 0.2);
   }
@@ -141,9 +132,6 @@ class LeftGesture : public Gesture{
   public : bool StartStage() override {
    return (yawBetween(45, 135) && pitchBetween(-45, 45) && rollBetween(-45, 45));
   }
-  public : bool Movement() override {
-    return (yawBetween(-45, 125) && abs(aaReal.x / accelScale) > 0.4 );
-  }
   public : bool EndStage() override {
     return (yawBetween(-30, 30) && abs(aaReal.x / accelScale) < 0.2);
   }
@@ -154,9 +142,6 @@ class LeftGesture : public Gesture{
 class DownGesture : public Gesture{
   public : bool StartStage() override {
     return (pitchBetween(45, 135) && yawBetween(-45, 45) && rollBetween(-45, 45));
-  }
-  public : bool Movement() override {
-    return (pitchBetween(-45, 135) && abs(aaReal.y / accelScale) > 0.4 );
   }
   public : bool EndStage() override {
     return (pitchBetween(-30, 30) && abs(aaReal.y / accelScale) < 0.2);
@@ -175,11 +160,12 @@ void startGestureCheck(){
 }
 
 void setup() {
-  
   Serial.begin(115200);
   Wire.begin(sda, scl);
   EEPROM.begin(512);
   pinMode(interrupt, INPUT);
+  pinMode(led, OUTPUT);
+  digitalWrite(led, LOW);
 
   bool reset = EEPROM.read(hasValues);
 
@@ -200,15 +186,10 @@ void setup() {
     password = readStringInEEPROM(eepromPassword);
     servername = readStringInEEPROM(eepromServer);
   }
-
-  pinMode(led, OUTPUT);
   
   gestures[0] = new LeftGesture();
   gestures[1] = new RightGesture();
   gestures[2] = new DownGesture();
-
-  connectToWiFi();
-  connectToServer();
 
   // initialize device
   Serial.println(F("Initializing I2C devices..."));
@@ -221,6 +202,7 @@ void setup() {
   }
   else{
     Serial.println(F("MPU6050 connection failed"));
+    digitalWrite(led, HIGH);
     while(1);
   }
 
@@ -277,8 +259,17 @@ void loop() {
 
   timer.tick();
 
-  processSerialCommands();
+  // if not connected to wifi, attempt to connect
+  if (WiFi.status() != WL_CONNECTED){
+    connectToWiFi();
+  }
 
+  // if not connected to server, attempt to connect
+  if (!client.connected()){
+    connectToServer();
+  }
+
+  processSerialCommands();
   checkForGestureStartCommand();
 
   // if programming failed, don't try to do anything
@@ -318,6 +309,9 @@ void loop() {
         timer.in(LEDFlashTime, turnOffLED);
         Serial.println(command);
         sendCommandOverNetwork(command);
+        
+        checkGestures = false;
+        Serial.println(F("Gesture check complete"));
       }
     }
     if(millis() - gestureCheckStart >= gesturePeriod){
@@ -339,12 +333,16 @@ void connectToWiFi(){
 }
 
 void connectToServer(){
-  Serial.println(F("Connecting to server"));
+  if (connectionAttempts >= maxConnectionAttempts) return;
+
+  Serial.print(F("Connecting to server at: ")); Serial.println(servername);
   if (!client.connect(servername, 1880)){
     Serial.println(F("Connection failed"));
+    connectionAttempts++;
     return;
   }
   Serial.println(F("Connected to server"));
+  connectionAttempts = 0;
 }
 
 void sendCommandOverNetwork(String command){
@@ -432,7 +430,6 @@ void processSerialCommands(){
     }
     else if (command.startsWith("set-server "))
     {
-      // set the IP address
       command.remove(0, 11);
       command.trim();
       Serial.print(F("Setting reporting server to: "));
@@ -440,6 +437,8 @@ void processSerialCommands(){
 
       servername = command;
       storeStringInEEPROM(servername, eepromServer);
+      connectionAttempts = 0;
+      connectToServer();
     }
     else if (command.startsWith("set-ssid "))
     {
@@ -451,6 +450,9 @@ void processSerialCommands(){
 
       ssid = command;
       storeStringInEEPROM(ssid, eepromSSID);
+      connectionAttempts = 0;
+      connectToWiFi();
+      connectToServer();
     }
     else if (command.startsWith("set-password "))
     {
@@ -462,7 +464,11 @@ void processSerialCommands(){
 
       password = command;
       storeStringInEEPROM(password, eepromPassword);
+      connectionAttempts = 0;
+      connectToWiFi();
+      connectToServer();
     }
+
     else if (command.startsWith("view-stored-values")){
       Serial.print(F("SSID: ")); Serial.println(readStringInEEPROM(eepromSSID));
       Serial.print(F("Password: ")); Serial.println(readStringInEEPROM(eepromPassword));
