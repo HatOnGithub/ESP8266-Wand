@@ -91,10 +91,14 @@ bool turnOffLED(void *){
 
 class Gesture {
   bool started;
+  bool moving;
   public : String command;
 
   public : virtual bool StartStage() = 0;
-  public : virtual bool EndStage() = 0;
+  public : virtual bool MoveStage() = 0;
+  public : virtual bool EndStage() {
+    return yawBetween(-30, 30) && pitchBetween(-30, 30) && rollBetween(-30, 30);
+  }
 
   Gesture(const String& command) : command(command),
      started(false){
@@ -103,14 +107,29 @@ class Gesture {
     if(!started){
       if(StartStage()){
         started = true;
-        Serial.println(F("detected start"));
+        Serial.print(F("detected start: "));
+        Serial.println(command);
+      }
+    }
+    else if (!moving){
+      if (MoveStage()){
+        moving = true;
+        Serial.print(F("detected movement: "));
+        Serial.println(command);
       }
     }
     else {
-      if(EndStage()){
+      if (!MoveStage()){
+        moving = false;
+        started = false;
+        Serial.print(F("movement aborted: "));
+        Serial.println(command);
+      }
+      else if(EndStage()){
           started = false;
+          moving = false;
           return true;
-        }
+      }
     }
     
     return false;
@@ -119,10 +138,10 @@ class Gesture {
 
 class RightGesture : public Gesture{
   public : bool StartStage() override {
-   return (yawBetween(-135, -45) && pitchBetween(-45, 45) && rollBetween(-45, 45));
+   return (yawBetween(-135, -45) && pitchBetween(-40, 40) && rollBetween(-40, 40));
   }
-  public : bool EndStage() override {
-    return (yawBetween(-30, 30) && abs(aaReal.x / accelScale) < 0.2);
+  public : bool MoveStage() override {
+    return (yawBetween(-50, 30) && pitchBetween(-40, 40) && rollBetween(-40, 40));
   }
   RightGesture() : Gesture("Right") {
   }
@@ -130,10 +149,10 @@ class RightGesture : public Gesture{
 
 class LeftGesture : public Gesture{
   public : bool StartStage() override {
-   return (yawBetween(45, 135) && pitchBetween(-45, 45) && rollBetween(-45, 45));
+   return (yawBetween(45, 135) && pitchBetween(-40, 40) && rollBetween(-40, 40));
   }
-  public : bool EndStage() override {
-    return (yawBetween(-30, 30) && abs(aaReal.x / accelScale) < 0.2);
+  public : bool MoveStage() override {
+    return (yawBetween(-30, 50) && pitchBetween(-40, 40) && rollBetween(-40, 40));
   }
   LeftGesture() : Gesture("Left") {
   }
@@ -141,10 +160,13 @@ class LeftGesture : public Gesture{
 
 class DownGesture : public Gesture{
   public : bool StartStage() override {
-    return (pitchBetween(45, 135) && yawBetween(-45, 45) && rollBetween(-45, 45));
+    return (pitchBetween(45, 135) && yawBetween(-40, 40) && rollBetween(-40, 40));
+  }
+  public : bool MoveStage() override {
+    return (pitchBetween(-30, 50) && yawBetween(-40, 40) && rollBetween(-40, 40));
   }
   public : bool EndStage() override {
-    return (pitchBetween(-30, 30) && abs(aaReal.y / accelScale) < 0.2);
+    return pitchBetween(-30, 30) && yawBetween(-40, 40) && rollBetween(-40, 40);
   }
   DownGesture() : Gesture("Down") {
   }
