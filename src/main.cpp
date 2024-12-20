@@ -91,19 +91,20 @@ bool turnOffLED(void *){
 
 
 class Gesture {
+  public : String command;
   bool started;
   bool moving;
-  public : String command;
 
+  Gesture(const String& command) : command(command),
+     started(false), moving(false) {
+    }
+    
   public : virtual bool StartStage() = 0;
   public : virtual bool MoveStage() = 0;
   public : virtual bool EndStage() {
     return yawBetween(-30, 30) && pitchBetween(-30, 30) && rollBetween(-30, 30);
   }
 
-  Gesture(const String& command) : command(command),
-     started(false){
-    }
   bool CheckMovement(){
     if(!started){
       if(StartStage()){
@@ -413,7 +414,7 @@ void storeStringInEEPROM(String str, int start){
     Serial.println(F("String too long, max is 64 characters"));
     return;
   }
-  for (int i = 0; i < str.length(); i++){
+  for (unsigned int i = 0; i < str.length(); i++){
     EEPROM.put(start + i, str[i]);
   }
   for (int i = str.length(); i < 64; i++){
