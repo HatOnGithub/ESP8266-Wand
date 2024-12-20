@@ -10,7 +10,7 @@
 const int scl = D1, sda = D2, led = D6, interrupt = D7;
 
 // EEPROM addresses
-const int eepromSSID = 0, eepromPassword = 64, eepromServer = 128, hasValues = 192;
+const int eepromSSID = 0, eepromPassword = 64, eepromServer = 128, eepromPort = 192, hasValues = 193;
 
 const unsigned long LEDFlashTime = 150;
 
@@ -62,6 +62,7 @@ unsigned long lastScreenRefresh = 0;
 String ssid;
 String password;
 String servername;
+int port = 18472;
 WiFiClient client;
 
 const int maxConnectionAttempts = 5;
@@ -77,7 +78,7 @@ void reportValues();
 void startGestureCheck();
 void processSerialCommands();
 void storeStringInEEPROM(String, int);
-void checkForGestureStartCommand();
+void processIncomingMessages();
 void sendCommandOverNetwork(String);
 String readStringInEEPROM(int);
 bool yawBetween(float, float);
@@ -138,10 +139,10 @@ class Gesture {
 
 class RightGesture : public Gesture{
   public : bool StartStage() override {
-   return (yawBetween(-135, -45) && pitchBetween(-40, 40) && rollBetween(-40, 40));
+   return (yawBetween(-135, -45) && pitchBetween(-30, 30));
   }
   public : bool MoveStage() override {
-    return (yawBetween(-50, 30) && pitchBetween(-40, 40) && rollBetween(-40, 40));
+    return (yawBetween(-50, 30) && pitchBetween(-30, 30));
   }
   RightGesture() : Gesture("Right") {
   }
@@ -149,10 +150,10 @@ class RightGesture : public Gesture{
 
 class LeftGesture : public Gesture{
   public : bool StartStage() override {
-   return (yawBetween(45, 135) && pitchBetween(-40, 40) && rollBetween(-40, 40));
+   return (yawBetween(45, 135) && pitchBetween(-30, 30));
   }
   public : bool MoveStage() override {
-    return (yawBetween(-30, 50) && pitchBetween(-40, 40) && rollBetween(-40, 40));
+    return (yawBetween(-30, 50) && pitchBetween(-30, 30));
   }
   LeftGesture() : Gesture("Left") {
   }
@@ -160,13 +161,13 @@ class LeftGesture : public Gesture{
 
 class DownGesture : public Gesture{
   public : bool StartStage() override {
-    return (pitchBetween(45, 135) && yawBetween(-40, 40) && rollBetween(-40, 40));
+    return (pitchBetween(45, 135) && yawBetween(-30, 30));
   }
   public : bool MoveStage() override {
-    return (pitchBetween(-30, 50) && yawBetween(-40, 40) && rollBetween(-40, 40));
+    return (pitchBetween(-30, 50) && yawBetween(-30, 30));
   }
   public : bool EndStage() override {
-    return pitchBetween(-30, 30) && yawBetween(-40, 40) && rollBetween(-40, 40);
+    return pitchBetween(-30, 30) && yawBetween(-30, 30);
   }
   DownGesture() : Gesture("Down") {
   }
@@ -207,6 +208,7 @@ void setup() {
     ssid = readStringInEEPROM(eepromSSID);
     password = readStringInEEPROM(eepromPassword);
     servername = readStringInEEPROM(eepromServer);
+    EEPROM.get(eepromPort, port);
   }
   
   gestures[0] = new LeftGesture();
@@ -292,7 +294,7 @@ void loop() {
   }
 
   processSerialCommands();
-  checkForGestureStartCommand();
+  processIncomingMessages();
 
   // if programming failed, don't try to do anything
   if (!dmpReady){
@@ -358,7 +360,7 @@ void connectToServer(){
   if (connectionAttempts >= maxConnectionAttempts) return;
 
   Serial.print(F("Connecting to server at: ")); Serial.println(servername);
-  if (!client.connect(servername, 1880)){
+  if (!client.connect(servername, 18472)){
     Serial.println(F("Connection failed"));
     connectionAttempts++;
     return;
@@ -371,19 +373,39 @@ void sendCommandOverNetwork(String command){
   if (!client.connected()){
     connectToServer();
   }
-  client.print(command);
+  client.println(command);
 }
 
-void checkForGestureStartCommand(){
+void processIncomingMessages(){
   if (!client.connected()){
     connectToServer();
   }
-  if (client.available()){
-    String command = client.readStringUntil('\n');
-    if (command == "start"){
-      startGestureCheck();
-    }
+  if (!client.available()){
+    return;
   }
+
+  // decode the incoming message
+  unsigned long processStart = micros();
+  String command = "";
+
+  while (client.available() > 0){
+    command += char(client.read());
+  }
+
+  // process the command
+  if (command == "start"){
+    startGestureCheck();
+  } 
+
+  // send an acknowledgement and the time taken to process the command
+  unsigned long time = micros() - processStart;
+
+  command.trim();
+  Serial.print(F("Received command: ")); Serial.println(command);
+  String ack = "Received command: \"" + command + "\" | Time to process: " + String(time) + "µs";
+  sendCommandOverNetwork(ack); // send an acknowledgement
+  
+  
 }
 
 void storeStringInEEPROM(String str, int start){
@@ -419,14 +441,19 @@ void firstSetup(){
   while(Serial.available() == 0);
   String temppassword = Serial.readStringUntil('\n');
 
-  Serial.println(F("Please enter the IP address, port (,and subdirectory) of the host server"));
+  Serial.println(F("Please enter the IP address or url of the host server"));
   while(Serial.available() == 0);
   String tempservername = Serial.readStringUntil('\n');
+
+  Serial.println(F("Please enter the port number of the host server"));
+  while(Serial.available() == 0);
+  String tempport = Serial.readStringUntil('\n');
 
   Serial.println(F("these are the values you entered: "));
   Serial.print(F("SSID: ")); Serial.println(tempssid);
   Serial.print(F("Password: ")); Serial.println(temppassword);
-  Serial.print(F("Server: ")); Serial.println(tempservername);
+  Serial.print(F("Server address: ")); Serial.println(tempservername);
+  Serial.print(F("Port: ")); Serial.println(tempport);
   Serial.println(F("If these are correct, type 'y' to save them to EEPROM, else type 'n' to re-enter them"));
 
   while(Serial.available() == 0);
@@ -438,6 +465,7 @@ void firstSetup(){
     storeStringInEEPROM(ssid, eepromSSID);
     storeStringInEEPROM(password, eepromPassword);
     storeStringInEEPROM(servername, eepromServer);
+    EEPROM.put(eepromPort, tempport.toInt());
 
     EEPROM.commit();
   }
@@ -489,6 +517,35 @@ void processSerialCommands(){
       connectionAttempts = 0;
       connectToWiFi();
       connectToServer();
+    }
+
+    else if (command.startsWith("set-port "))
+    {
+      // set the port
+      command.remove(0, 9);
+      command.trim();
+      if (!command.toInt()){
+        Serial.println(F("Port must be a number"));
+        return;
+      }
+
+      Serial.print(F("Setting port to: "));
+      Serial.println(command);
+
+      port = command.toInt();
+      EEPROM.put(eepromPort, port);
+      EEPROM.commit();
+      connectionAttempts = 0;
+      connectToServer();
+    }
+
+    else if (command.startsWith("send "))
+    {
+      command.remove(0, 5);
+      command.trim();
+      Serial.print(F("Sending command: "));
+      Serial.println(command);
+      sendCommandOverNetwork(command);
     }
 
     else if (command.startsWith("view-stored-values")){
