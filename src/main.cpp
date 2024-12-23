@@ -6,6 +6,12 @@
 #include <ESP8266WiFi.h>
 
 
+enum ReportMode{
+  REPORT_TO_SERIAL,
+  REPORT_TO_NETWORK,
+  REPORT_TO_ALL
+};
+
 // pin allocations
 const int scl = D1, sda = D2, led = D6, interrupt = D7;
 
@@ -18,6 +24,8 @@ const unsigned long gesturePeriod = 3000;
 unsigned long gestureCheckStart;
 
 bool checkGestures = false, enableReporting = false;
+
+ReportMode reportMode = REPORT_TO_SERIAL;
 
 // MPU6050 related stuff
 const int accelRange = 4, gyroRange = 250;
@@ -76,10 +84,12 @@ void connectToServer();
 void updateAccelGyro();
 void reportValues();
 void startGestureCheck();
-void processSerialCommands();
+void processCommand(String command);
 void storeStringInEEPROM(String, int);
-void processIncomingMessages();
-void sendCommandOverNetwork(String);
+void processNetworkMessages();
+void processSerialMessages();
+void sendDebugMsgOverNetwork(String);
+void sendMessageOverNetwork(String);
 String readStringInEEPROM(int);
 bool yawBetween(float, float);
 bool pitchBetween(float, float);
@@ -269,6 +279,11 @@ void setup() {
       // get expected DMP packet size for later comparison
       packetSize = mpu.dmpGetFIFOPacketSize();
 
+      // flash LED to indicate ready
+      digitalWrite(led, HIGH);
+      timer.in(50, turnOffLED);
+
+
   } else {
       // ERROR!
       // 1 = initial memory load failed
@@ -294,8 +309,8 @@ void loop() {
     connectToServer();
   }
 
-  processSerialCommands();
-  processIncomingMessages();
+  processNetworkMessages();
+  processSerialMessages();
 
   // if programming failed, don't try to do anything
   if (!dmpReady){
@@ -333,15 +348,21 @@ void loop() {
         digitalWrite(led, HIGH);
         timer.in(LEDFlashTime, turnOffLED);
         Serial.println(command);
-        sendCommandOverNetwork(command);
+        sendMessageOverNetwork(command);
         
         checkGestures = false;
-        Serial.println(F("Gesture check complete"));
+        if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL)
+          Serial.println(F("Gesture check complete"));
+        if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL)
+          sendDebugMsgOverNetwork(F("Gesture check complete"));
       }
     }
     if(millis() - gestureCheckStart >= gesturePeriod){
       checkGestures = false;
-      Serial.println(F("Gesture check complete"));
+      if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL)
+        Serial.println(F("Gesture check timed out"));
+      if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL)
+        sendDebugMsgOverNetwork(F("Gesture check timed out"));
     }
   }
 }
@@ -370,14 +391,26 @@ void connectToServer(){
   connectionAttempts = 0;
 }
 
-void sendCommandOverNetwork(String command){
+void sendDebugMsgOverNetwork(String command){
   if (!client.connected()){
     connectToServer();
   }
+  while (!client.availableForWrite());
+
+  client.println("#" + command);
+}
+
+void sendMessageOverNetwork(String command){
+  if (!client.connected()){
+    connectToServer();
+  }
+  while (!client.availableForWrite());
+
   client.println(command);
 }
 
-void processIncomingMessages(){
+
+void processNetworkMessages(){
   if (!client.connected()){
     connectToServer();
   }
@@ -393,20 +426,27 @@ void processIncomingMessages(){
     command += char(client.read());
   }
 
-  // process the command
-  if (command == "start"){
-    startGestureCheck();
-  } 
+  processCommand(command);
 
   // send an acknowledgement and the time taken to process the command
   unsigned long time = micros() - processStart;
 
   command.trim();
-  Serial.print(F("Received command: ")); Serial.println(command);
   String ack = "Received command: \"" + command + "\" | Time to process: " + String(time) + "µs";
-  sendCommandOverNetwork(ack); // send an acknowledgement
+  Serial.println(ack);
+  sendDebugMsgOverNetwork(ack); // send an acknowledgement
   
   
+}
+
+void processSerialMessages(){
+  if (Serial.available() > 0){
+    String command = "";
+    while (Serial.available() > 0){
+      command += char(Serial.read());
+    }
+    processCommand(command);
+  }
 }
 
 void storeStringInEEPROM(String str, int start){
@@ -473,123 +513,190 @@ void firstSetup(){
   else firstSetup();
 }
 
-void processSerialCommands(){
-  if(Serial.available() > 0){
-    String command = Serial.readStringUntil('\n');
-    if(command == "start"){
-      startGestureCheck();
-    }
-    else if (command.startsWith("set-server "))
-    {
-      command.remove(0, 11);
-      command.trim();
-      Serial.print(F("Setting reporting server to: "));
-      Serial.println(command);
 
-      servername = command;
-      storeStringInEEPROM(servername, eepromServer);
-      connectionAttempts = 0;
-      connectToServer();
-    }
-    else if (command.startsWith("set-ssid "))
-    {
-      // set the SSID
-      command.remove(0, 9);
-      command.trim();
-      Serial.print(F("Setting SSID to: "));
-      Serial.println(command);
+void processCommand(String rawCommand){
 
-      ssid = command;
-      storeStringInEEPROM(ssid, eepromSSID);
-      connectionAttempts = 0;
-      connectToWiFi();
-      connectToServer();
-    }
-    else if (command.startsWith("set-password "))
-    {
-      // set the password
-      command.remove(0, 13);
-      command.trim();
-      Serial.print(F("Setting password to: "));
-      Serial.println(command);
+  String command = rawCommand;
+  command.trim();
 
-      password = command;
-      storeStringInEEPROM(password, eepromPassword);
-      connectionAttempts = 0;
-      connectToWiFi();
-      connectToServer();
-    }
+  if(command.startsWith("start")){
+    startGestureCheck();
+  }
+  else if (command.startsWith("set-server "))
+  {
+    command.remove(0, 11);
+    command.trim();
 
-    else if (command.startsWith("set-port "))
-    {
-      // set the port
-      command.remove(0, 9);
-      command.trim();
-      if (!command.toInt()){
+    if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL)
+      Serial.println("Setting reporting server to: " + command);
+    if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL)
+      sendDebugMsgOverNetwork("Setting reporting server to: " + command);
+    
+    servername = command;
+    storeStringInEEPROM(servername, eepromServer);
+    connectionAttempts = 0;
+    connectToServer();
+  }
+  else if (command.startsWith("set-ssid "))
+  {
+    // set the SSID
+    command.remove(0, 9);
+    command.trim();
+
+    if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL){
+      Serial.print(F("Setting SSID to: ")); Serial.println(command);
+    }
+    if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL)
+      sendDebugMsgOverNetwork("Setting SSID to: " + command);
+    
+
+    ssid = command;
+    storeStringInEEPROM(ssid, eepromSSID);
+    connectionAttempts = 0;
+    connectToWiFi();
+    connectToServer();
+  }
+  else if (command.startsWith("set-password "))
+  {
+    // set the password
+    command.remove(0, 13);
+    command.trim();
+    if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL){
+      Serial.print(F("Setting password to: ")); Serial.println(command);
+    }
+    if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL)
+      sendDebugMsgOverNetwork("Setting password to: " + command);
+
+    password = command;
+    storeStringInEEPROM(password, eepromPassword);
+    connectionAttempts = 0;
+    connectToWiFi();
+    connectToServer();
+  }
+
+  else if (command.startsWith("set-port "))
+  {
+    // set the port
+    command.remove(0, 9);
+    command.trim();
+    if (!command.toInt()){
+      if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL)
         Serial.println(F("Port must be a number"));
-        return;
-      }
-
-      Serial.print(F("Setting port to: "));
-      Serial.println(command);
-
-      port = command.toInt();
-      EEPROM.put(eepromPort, port);
-      EEPROM.commit();
-      connectionAttempts = 0;
-      connectToServer();
+      if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL)
+        sendDebugMsgOverNetwork(F("Port must be a number"));
+      return;
     }
 
-    else if (command.startsWith("send "))
-    {
-      command.remove(0, 5);
-      command.trim();
-      Serial.print(F("Sending command: "));
-      Serial.println(command);
-      sendCommandOverNetwork(command);
+    if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL){
+      Serial.print(F("Setting port to: ")); Serial.println(command);
     }
+    if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL)
+      sendDebugMsgOverNetwork("Setting port to: " + command);
 
-    else if (command.startsWith("view-stored-values")){
+    port = command.toInt();
+    EEPROM.put(eepromPort, port);
+    EEPROM.commit();
+    connectionAttempts = 0;
+    connectToServer();
+  }
+
+  else if (command.startsWith("send "))
+  {
+    command.remove(0, 5);
+    command.trim();
+    
+    if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL){
+      Serial.print(F("Sending command: ")); Serial.println(command);
+    }
+    if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL)
+      sendDebugMsgOverNetwork("Sending command: " + command);
+
+    sendDebugMsgOverNetwork(command);
+  }
+
+  else if (command.startsWith("view-stored-values")){
+    if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL){
       Serial.print(F("SSID: ")); Serial.println(readStringInEEPROM(eepromSSID));
       Serial.print(F("Password: ")); Serial.println(readStringInEEPROM(eepromPassword));
       Serial.print(F("Server: ")); Serial.println(readStringInEEPROM(eepromServer));
       Serial.print(F("Reset flag (0 = First Boot, 1 = Normal): ")); Serial.println(EEPROM.read(hasValues));
     }
-    else if (command == "toggle-report")
-    {
-      enableReporting = !enableReporting;
-      Serial.print(F("Reporting is now "));
-      Serial.println(enableReporting ? "enabled" : "disabled");
-    }
-
-    else if (command == "sim"){
-      Serial.println(F("Simulating gesture start"));
-      startGestureCheck();
-    }
-
-    else if (command == "reset")
-    {
-      Serial.println(F("Resetting EEPROM"));
-      for (int i = 0; i < 200; i++)
-      {
-        EEPROM.put(i, 0);
-      }
-      EEPROM.put(hasValues, 0);
-      EEPROM.commit();
+    if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL){
+      sendDebugMsgOverNetwork("SSID: " + readStringInEEPROM(eepromSSID));
+      sendDebugMsgOverNetwork("Password: " + readStringInEEPROM(eepromPassword));
+      sendDebugMsgOverNetwork("Server: " + readStringInEEPROM(eepromServer));
+      sendDebugMsgOverNetwork("Reset flag (0 = First Boot, 1 = Normal): " + String(EEPROM.read(hasValues)));
     }
   }
+  else if (command.startsWith("toggle-mpu-readout"))
+  {
+    enableReporting = !enableReporting;
+    if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL){
+      Serial.print(F("Reporting is now ")); Serial.println(enableReporting ? "enabled" : "disabled");
+    }
+    if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL)
+      sendDebugMsgOverNetwork("Reporting is now " + String(enableReporting ? "enabled" : "disabled"));
+  }
+
+  else if (command.startsWith("set-reportmode ")){
+    command.remove(0, 15);
+    command.trim();
+    command.toLowerCase();
+    if (command == "serial"){
+      reportMode = REPORT_TO_SERIAL;
+      Serial.println(F("Reporting to serial"));
+      sendDebugMsgOverNetwork(F("Reporting to serial"));
+    }
+    else if (command == "network"){
+      reportMode = REPORT_TO_NETWORK;
+      Serial.println(F("Reporting to network"));
+      sendDebugMsgOverNetwork(F("Reporting to network"));
+    }
+    else if (command == "all"){
+      reportMode = REPORT_TO_ALL;
+      Serial.println(F("Reporting to all"));
+      sendDebugMsgOverNetwork(F("Reporting to all"));
+    }
+    else{
+      if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL)
+        Serial.println(F("Invalid report mode, must be one of 'serial', 'network', or 'all'"));
+      if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL)
+        sendDebugMsgOverNetwork(F("Invalid report mode, must be one of 'serial', 'network', or 'all"));
+    }
+  }
+
+  else if (command.startsWith("reset"))
+  {
+    if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL)
+      Serial.println(F("Resetting EEPROM"));
+    if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL)
+      sendDebugMsgOverNetwork(F("Resetting EEPROM"));
+      
+    for (int i = 0; i < 200; i++)
+    {
+      EEPROM.put(i, 0);
+    }
+    EEPROM.put(hasValues, 0);
+    EEPROM.commit();
+  }
+  
 }
 
 void reportValues(){ 
 
-  Serial.print(x); Serial.print(F(","));
-  Serial.print(y); Serial.print(F(","));
-  Serial.print(z); Serial.print(F(","));
+  if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL){
+    Serial.print(x); Serial.print(F(","));
+    Serial.print(y); Serial.print(F(","));
+    Serial.print(z); Serial.print(F(","));
 
-  Serial.print(yaw); Serial.print(F(","));
-  Serial.print(pitch); Serial.print(F(","));
-  Serial.print(roll); Serial.println();
-
+    Serial.print(yaw); Serial.print(F(","));
+    Serial.print(pitch); Serial.print(F(","));
+    Serial.print(roll); Serial.println();
+  }
+  if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL){
+    String message = String(x) + "," + String(y) + "," + String(z) + "," + String(yaw) + "," + String(pitch) + "," + String(roll);
+    sendMessageOverNetwork(message);
+  }
 }
 
 bool yawBetween(float min, float max){
