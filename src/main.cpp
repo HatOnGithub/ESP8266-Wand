@@ -20,7 +20,7 @@ const int eepromSSID = 0, eepromPassword = 64, eepromServer = 128, eepromPort = 
 
 const unsigned long LEDFlashTime = 150;
 
-const unsigned long gesturePeriod = 3000;
+unsigned long gesturePeriod = 3000;
 unsigned long gestureCheckStart;
 
 bool checkGestures = false, enableReporting = false;
@@ -281,7 +281,8 @@ void setup() {
 
       // flash LED to indicate ready
       digitalWrite(led, HIGH);
-      timer.in(50, turnOffLED);
+      delay(50);
+      digitalWrite(led, LOW);
 
 
   } else {
@@ -330,11 +331,6 @@ void loop() {
     yaw *= 180/M_PI;
     pitch *= 180/M_PI;
     roll *= 180/M_PI;
-
-    // apply scaling
-    x = aaReal.x / accelScale;
-    y = aaReal.y / accelScale;
-    z = aaReal.z / accelScale;
 
     if (enableReporting){
       reportValues();
@@ -519,7 +515,9 @@ void processCommand(String rawCommand){
   String command = rawCommand;
   command.trim();
 
-  if(command.startsWith("start")){
+  if(command.startsWith("start ")){
+    command.remove(0, 6);
+    gesturePeriod = command.toInt();
     startGestureCheck();
   }
   else if (command.startsWith("set-server "))
@@ -628,6 +626,7 @@ void processCommand(String rawCommand){
       sendDebugMsgOverNetwork("Reset flag (0 = First Boot, 1 = Normal): " + String(EEPROM.read(hasValues)));
     }
   }
+
   else if (command.startsWith("toggle-mpu-readout"))
   {
     enableReporting = !enableReporting;
@@ -685,16 +684,12 @@ void processCommand(String rawCommand){
 void reportValues(){ 
 
   if (reportMode == REPORT_TO_SERIAL || reportMode == REPORT_TO_ALL){
-    Serial.print(x); Serial.print(F(","));
-    Serial.print(y); Serial.print(F(","));
-    Serial.print(z); Serial.print(F(","));
-
     Serial.print(yaw); Serial.print(F(","));
     Serial.print(pitch); Serial.print(F(","));
     Serial.print(roll); Serial.println();
   }
   if (reportMode == REPORT_TO_NETWORK || reportMode == REPORT_TO_ALL){
-    String message = String(x) + "," + String(y) + "," + String(z) + "," + String(yaw) + "," + String(pitch) + "," + String(roll);
+    String message = String(yaw) + "," + String(pitch) + "," + String(roll);
     sendMessageOverNetwork(message);
   }
 }
